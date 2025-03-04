@@ -117,10 +117,13 @@ GamePhase :: enum {
     EndGame,
 }
 
-CardOutline :: enum {
+SelectableCards :: enum {
     None,
-    Red,
-    Green,
+    Faceup,
+    Facedown,
+    AllInHand,
+    DiscardPile,
+    Deck,
 }
 
 // ============================================================================
@@ -134,7 +137,6 @@ Card :: struct {
     alive: bool,
     tint: rl.Color,
     pos: V2,
-    outline: CardOutline,
 }
 
 card_init :: proc(val: i8) -> Card {
@@ -174,25 +176,6 @@ card_render :: proc(card: ^Card, tex: Tex) {
         0,
         tint
     )
-
-    if outline != CardOutline.None {
-        x_offset := (SPRITE_CARD_W + 1) * 3 if outline == CardOutline.Green else (SPRITE_CARD_W + 1) * 2
-        tex_outline := Rec { 
-            x = SPRITE_CARD_X + f32(x_offset),
-            y = SPRITE_CARD_Y - (SPRITE_CARD_H + 1), 
-            width = SPRITE_CARD_W, 
-            height = SPRITE_CARD_H 
-        }
-
-        rl.DrawTexturePro(
-            tex,
-            tex_outline,
-            rec,
-            V2 {},
-            0,
-            rl.WHITE
-        )
-    }
 
     if card.is_shown {
         draw_int(i8, card.val, i32(card.pos.x) + i32(rec.width / 2), i32(card.pos.y) + i32(rec.height / 2), 30, rl.BLACK )
@@ -235,6 +218,24 @@ card_highlighted :: proc(card: ^Card) -> bool {
             card.tex_partial.height * SCALE,
         }
     )
+}
+
+card_apply_highlight :: proc(card: ^Card, highlighted: bool, selectable: bool, time: f32) {
+    using card
+    if highlighted {
+        if selectable && card_highlighted(card) {
+            tint = rl.WHITE if card_highlighted(card) else rl.LIGHTGRAY
+            fade_time: f32 = 0.25
+            interpolation_factor := (1.0 + math.sin_f32((time * math.PI * 2.0) / fade_time)) / 2.0
+            tint = rl.ColorLerp(rl.WHITE, rl.LIGHTGRAY, interpolation_factor)
+        }
+        else {
+            tint = rl.LIGHTGRAY
+        }
+    }
+    else {
+        tint = rl.DARKGRAY
+    }
 }
 
 // ============================================================================
@@ -292,12 +293,10 @@ player_render_hand :: proc(player: ^Player, card_tex: Tex) {
 
 player_select_card :: proc(player: ^Player, card: ^Card) -> bool {
     if card_highlighted(card) {
-        card.tint = rl.WHITE 
         if rl.IsMouseButtonPressed(rl.MouseButton.LEFT) {
             return true
         }
     }
-
     return false
 }
 
@@ -307,45 +306,27 @@ player_select_from_cards :: proc(player: ^Player, cards: []Card) -> (bool, int) 
             return true, i
         }
     }
-
     return false, 0
 }
 
 player_select_from_faceup_hand :: proc(player: ^Player) -> (bool, int) {
     using player
-
     for &card, i in hand {
         if card.is_shown && player_select_card(player, &card) {
             return true, i
         }
     }
-
     return false, 0
 }
 
 player_select_from_facedown_hand :: proc(player: ^Player) -> (bool, int){
     using player
-
     for &card, i in hand {
         if !card.is_shown && player_select_card(player, &card) {
             return true, i
         }
     }
-
     return false, 0
-}
-
-player_highlight :: proc(player: ^Player, highlighted: bool) {
-    using player
-    for &card in hand {
-        card.tint = rl.LIGHTGRAY if highlighted else rl.DARKGRAY
-        if highlighted {
-            card.tint = rl.WHITE if card_highlighted(&card) else rl.LIGHTGRAY
-        }
-        else {
-            card.tint = rl.DARKGRAY
-        }
-    }
 }
 
 player_num_faceup :: proc(player: Player) -> u8 {
@@ -382,6 +363,7 @@ GameState :: struct {
     discard: Card,
     players: [dynamic]Player,
     current_player: int,
+    time: f32,
 }
 
 print_deck :: proc(state: GameState, num_cards: u8) {
@@ -427,7 +409,6 @@ render_selected_card :: proc(state: ^GameState) {
     }
 
     card := &state.deck[0] if state.phase == GamePhase.DeckFlipped else &state.discard
-    card.outline = CardOutline.Green
     card_render(card, state.card_tex)
 }
 
@@ -462,8 +443,6 @@ render_scores :: proc(state: GameState) {
 next_turn :: proc(state: ^GameState) {
     using state
 
-    deck[0].outline = CardOutline.None
-    discard.outline = CardOutline.None
     index := current_player
     next := (current_player + 1) % 2
     hand := players[current_player].hand
@@ -503,7 +482,7 @@ next_turn :: proc(state: ^GameState) {
 init :: proc() -> GameState {
     deck := make([dynamic]Card, 0, 155)
     players := make([dynamic]Player, 0, 2)
-    card_tex := rl.LoadTexture("./assets.png")
+    card_tex := rl.LoadTexture("./assets/cards.png")
 
     append(&players, player_init("Player1", V2 { PADDING, SCREEN_HEIGHT - f32(3 * ((SPRITE_CARD_H * SCALE) + 1)) - PADDING }))
     append(&players, player_init("Player2", V2 { PADDING, PADDING }))
@@ -554,7 +533,7 @@ deal :: proc(state: ^GameState) {
     // Reset face-up state for all cards in the deck
     for &card in deck {
         card.is_shown = false
-        card.outline = CardOutline.None
+        card.alive = true
     }
 
     // Shuffle then deal new hands
@@ -583,30 +562,25 @@ flip_initial_two_cards :: proc(state: ^GameState) {
         players[current_player].hand[index].is_shown = true
     }
 
-    num1: u8 = player_num_faceup(state.players[0])
-    num2: u8 = player_num_faceup(state.players[1])
+    num1: u8 = player_num_faceup(state.players[current_player])
+    num2: u8 = player_num_faceup(state.players[(current_player + 1) % 2])
     assert(num1 < 3, "Invalid state for FlipInitialTwoCards")
     assert(num2 < 3, "Invalid state for FlipInitialTwoCards")
 
-    if (current_player == 0) && (num1 == 2) {
-        current_player = 1
-    }
-    else if (current_player == 1) && (num2 == 2) {
-        current_player = 0
+    if (num1 == 2) && (num2 == 2) {
+        current_player = (current_player + 1) % 2
         phase = GamePhase.SelectFromPile
+    }
+    else if num1 == 2 {
+        current_player = (current_player + 1) % 2
     }
 }
 
 select_from_pile :: proc (state: ^GameState) {
     using state
     draw_instruction("select from a pile")
-
     player_current := &players[current_player]
     cards: [2]Card = { discard, deck[0] }
-
-    discard.tint = rl.WHITE if card_highlighted(&discard) else rl.LIGHTGRAY
-    deck[0].tint = rl.WHITE if card_highlighted(&deck[0]) else rl.LIGHTGRAY
-
     selected, index := player_select_from_cards(player_current, cards[:])
     if selected {
         assert(index < 2, "player selected invalid card")
@@ -623,7 +597,6 @@ select_from_pile :: proc (state: ^GameState) {
 deck_flipped :: proc(state: ^GameState) {
     using state
     player_current := &players[current_player]
-
     if player_select_card(player_current, &discard) {
         discard = deck[0]
         pop_front(&deck)
@@ -637,7 +610,6 @@ deck_flipped :: proc(state: ^GameState) {
 
 replace_from_hand :: proc(state: ^GameState) {
     using state
-
     player_current := &players[current_player]
     for &card in player_current.hand {
         if player_select_card(player_current, &card) {
@@ -645,7 +617,6 @@ replace_from_hand :: proc(state: ^GameState) {
             card = pop_front(&deck) if deck[0].is_shown else discard
             discard = temp
             card.is_shown = true
-            card.outline = CardOutline.None
             next_turn(state)
             break
         }
@@ -655,7 +626,6 @@ replace_from_hand :: proc(state: ^GameState) {
 
 flip_from_hand :: proc(state: ^GameState) {
     using state
-
     player_current := &players[current_player]
     selected, index := player_select_from_facedown_hand(player_current);
     if selected {
@@ -666,15 +636,12 @@ flip_from_hand :: proc(state: ^GameState) {
 
 end_round :: proc(state: ^GameState) {
     using state
-
     for &player, index in players {
         for &card in player.hand {
             card.is_shown = true
             card.tint = rl.WHITE
-            card.outline = CardOutline.Green if player_score(player) < player_score(players[(current_player + 1) % 2]) else CardOutline.Red
         }
     }
-
     // TODO: use button
     draw_instruction("round ended\npress N to start next round")
     if rl.IsKeyPressed(rl.KeyboardKey.N){
@@ -686,10 +653,29 @@ end_game :: proc(state: ^GameState) {
     draw_instruction("game ended")
 }
 
-highlight_player_cards :: proc(state: ^GameState) {
+highlight_selectable :: proc(state: ^GameState, selectable: SelectableCards, time: f32) {
     using state
-    for &player, index in players {
-        player_highlight(&player, index == current_player)
+    switch selectable {
+        // TODO: this is NASTY...refactor idiot...
+        case SelectableCards.Faceup:  fallthrough
+        case SelectableCards.Facedown: fallthrough
+        case SelectableCards.AllInHand: fallthrough
+        case SelectableCards.None: {
+            for &player, index in players {
+                for &card in player.hand {
+                    is_selectable: bool
+                    #partial switch selectable {
+                        case SelectableCards.Faceup: is_selectable = card.is_shown
+                        case SelectableCards.Facedown: is_selectable = !card.is_shown
+                        case SelectableCards.AllInHand: is_selectable = true
+                        case SelectableCards.None: is_selectable = false
+                    }
+                    card_apply_highlight(&card, index == current_player, is_selectable, time)
+                }
+            }
+        }
+        case SelectableCards.DiscardPile: card_apply_highlight(&discard, true, true, time)
+        case SelectableCards.Deck: card_apply_highlight(&deck[0], true, true, time)
     }
 }
 
@@ -700,13 +686,11 @@ render_player_cards :: proc(state: ^GameState) {
     }
 }
 
-update :: proc(state: ^GameState) {
+update :: proc(state: ^GameState, dt: f32) {
     using state
 
     rl.DrawText("SKYJO", SCREEN_WIDTH/2, SCREEN_HEIGHT/2, 20 * SCALE, rl.WHITE)
-    fmt.println(state.phase)
-    print_deck(state^, 5)
-    for player in players do player_print_hand(player)
+    time += dt
 
     switch state.phase {
         case GamePhase.Deal: { 
@@ -714,23 +698,26 @@ update :: proc(state: ^GameState) {
         }
         case GamePhase.FlipInitialTwoCards: { 
             flip_initial_two_cards(state)
-            highlight_player_cards(state)
+            highlight_selectable(state, SelectableCards.Facedown, time)
         }
         case GamePhase.SelectFromPile: { 
             select_from_pile(state)
-            highlight_player_cards(state)
+            highlight_selectable(state, SelectableCards.None, time)
+            highlight_selectable(state, SelectableCards.Deck, time)
+            highlight_selectable(state, SelectableCards.DiscardPile, time)
         }
         case GamePhase.ReplaceFromHand: { 
             replace_from_hand(state)
-            highlight_player_cards(state)
+            highlight_selectable(state, SelectableCards.AllInHand, time)
         }
         case GamePhase.DeckFlipped: { 
             deck_flipped(state)
-            highlight_player_cards(state)
+            highlight_selectable(state, SelectableCards.AllInHand, time)
+            highlight_selectable(state, SelectableCards.DiscardPile, time)
         }
         case GamePhase.FlipFromHand: { 
             flip_from_hand(state)
-            highlight_player_cards(state)
+            highlight_selectable(state, SelectableCards.Facedown, time)
         }
         case GamePhase.EndRound: { 
             end_round(state)
@@ -739,7 +726,6 @@ update :: proc(state: ^GameState) {
             end_game(state)
         }
     }
-
 
     render_deck(state)
     render_scores(state^)
@@ -763,7 +749,7 @@ main :: proc() {
     for !rl.WindowShouldClose() {
         if rl.IsKeyPressed(rl.KeyboardKey.P) {
             fmt.println("Taking screenshot")
-            rl.TakeScreenshot("screenshot.png")
+            rl.TakeScreenshot("./doc/screenshot.png")
         }
 
         if rl.IsKeyPressed(rl.KeyboardKey.R) {
@@ -777,6 +763,6 @@ main :: proc() {
 
         rl.ClearBackground(rl.DARKBLUE)
 
-        update(&state)
+        update(&state, rl.GetFrameTime())
     }
 }
