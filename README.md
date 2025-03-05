@@ -6,7 +6,7 @@ A videogame implementation of the Skyjo cardgame.
 
 This is not yet feature complete (or even playable).
 
-![alt text](./screenshot.png)
+![alt text](./doc/screenshot.png)
 
 ## Build Info
 
