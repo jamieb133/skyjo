@@ -2,6 +2,7 @@
 
 // ============================================================================
 // TODO:
+// -- Cards as sprites
 // -- Turn based state handling
 // -- Tagged unions as state data rather than enums?
 // -- Decks to use circular buffers so cards can be pushed to the bottom
@@ -51,6 +52,11 @@ SPRITE_CARD_Y :: 73
 SPRITE_CARD_W :: 18
 SPRITE_CARD_H :: 26
 
+// Background asset offsets
+CLOUD_OFFSETS := []Rec { 
+    Rec { x = 0, y = 165, width = 100, height = 165 },
+} 
+
 CARD_MAP := map[i8][]i8 { 
     5 = []i8 { -2 },
     10 = []i8 { -1, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12 },
@@ -82,6 +88,14 @@ draw_int :: proc($T: typeid, val: T, x: i32, y: i32, size: i32, color: rl.Color)
 
 v2_in_rec :: proc(pos: V2, rec: Rec) -> bool {
     return (pos.x > rec.x) && (pos.x < (rec.x + rec.width)) && (pos.y > rec.y) && (pos.y < (rec.y + rec.height))
+}
+
+v2_operation :: proc(vec1: V2, vec2: V2, fn: proc(f32, f32) -> f32) -> V2 {
+    return V2 { fn(vec1.x, vec2.x), fn(vec1.y, vec2.y) }
+}
+
+v2_operation_val :: proc(vec: V2, val: f32, fn: proc(f32, f32) -> f32) -> V2 {
+    return V2 { fn(vec.x, val), fn(vec.y, val) }
 }
 
 rec_scale :: proc (rec: Rec, scale: f32) -> Rec {
@@ -124,6 +138,46 @@ SelectableCards :: enum {
     AllInHand,
     DiscardPile,
     Deck,
+}
+
+// ============================================================================
+// Sprite Type
+// ============================================================================
+
+Cloud :: struct {
+    tex: Tex,
+    partial: Rec,
+    scale: f32,
+    pos: V2,
+    vel: V2,
+    tint: rl.Color,
+}
+
+cloud_width :: proc(cloud: Cloud) -> f32 {
+    using cloud
+    return partial.width * SCALE * scale
+}
+
+cloud_update :: proc(cloud: ^Cloud, dt: f32) {
+    // Restart position
+    if (cloud.pos.x + cloud_width(cloud^)) < 0 {
+        cloud.pos.x = SCREEN_WIDTH
+    }
+    // Update Velocity
+    cloud.pos.x += cloud.vel.x * dt
+    cloud.pos.y += cloud.vel.y * dt
+}
+
+cloud_render :: proc(cloud: Cloud) {
+    using cloud
+    rl.DrawTexturePro(
+        tex,
+        partial,
+        Rec { pos.x, pos.y, partial.width * SCALE * scale, partial.height * SCALE * scale },
+        V2 {},
+        0,
+        tint
+    )
 }
 
 // ============================================================================
@@ -359,6 +413,7 @@ player_print_hand :: proc(player: Player) {
 GameState :: struct {
     phase: GamePhase,
     card_tex: Tex,
+    clouds: [dynamic]Cloud,
     deck: [dynamic]Card,
     discard: Card,
     players: [dynamic]Player,
@@ -479,11 +534,67 @@ next_turn :: proc(state: ^GameState) {
     phase = GamePhase.EndGame if (players[index].score >= 100) || (players[next].score >= 100) else GamePhase.EndRound
 }
 
+load_clouds :: proc() -> [dynamic]Cloud {
+    clouds := make([dynamic]Cloud, 0, 100)
+    tex := rl.LoadTexture("./assets/clouds.png")
+
+    // Create parallax effect 
+
+    num := 3
+    scale: f32 = 0.5
+    for i in 0..<num {
+        append(&clouds, Cloud {
+            tex = tex,
+            partial = CLOUD_OFFSETS[0],
+            scale = scale,
+            pos = V2 { 
+                (SCREEN_WIDTH*0.75) + ((SCREEN_WIDTH*0.75) * (f32(i) / f32(num))),
+                (SCREEN_HEIGHT * 0.75) - ((SCREEN_HEIGHT*0.75) * (f32(i) / f32(num))) - (CLOUD_OFFSETS[0].height * scale) },
+            vel = V2{ -50, 0 },
+            tint = rl.Color { 255, 255, 255, 200 },
+        })
+    }
+
+    for i in 0..<5 {
+        farther_scale: f32 = 0.25
+        farther_partial := CLOUD_OFFSETS[0]
+        append(&clouds, Cloud {
+            tex = tex,
+            partial = farther_partial,
+            scale = farther_scale,
+            pos = V2 { SCREEN_WIDTH - (f32(i) * 500), (SCREEN_HEIGHT >> 1) + f32(i)},
+            vel = V2{ -25, 0 },
+            tint = rl.Color { 255, 255, 255, 128 },
+        })
+    }
+
+    for i in 0..<5 {
+        farther_scale: f32 = 0.125
+        farther_partial := CLOUD_OFFSETS[0]
+        append(&clouds, Cloud {
+            tex = tex,
+            partial = farther_partial,
+            scale = farther_scale,
+            pos = V2 { (SCREEN_WIDTH >> 1) - (f32(i) * 500), (SCREEN_HEIGHT >> 1) - (farther_partial.height * farther_scale * 5) + (f32(i) * (SCREEN_HEIGHT >> 1) / f32(i))},
+            vel = V2{ -12, 0 },
+            tint = rl.Color { 255, 255, 255, 64 },
+        })
+    }
+
+    return clouds
+}
+
+unload_clouds :: proc(state: ^GameState) {
+    using state
+    rl.UnloadTexture(clouds[0].tex) // TODO: store this ID somewhere else
+    delete(clouds)
+}
+
 init :: proc() -> GameState {
     deck := make([dynamic]Card, 0, 155)
-    players := make([dynamic]Player, 0, 2)
     card_tex := rl.LoadTexture("./assets/cards.png")
 
+    players := make([dynamic]Player, 0, 2)
     append(&players, player_init("Player1", V2 { PADDING, SCREEN_HEIGHT - f32(3 * ((SPRITE_CARD_H * SCALE) + 1)) - PADDING }))
     append(&players, player_init("Player2", V2 { PADDING, PADDING }))
 
@@ -498,6 +609,7 @@ init :: proc() -> GameState {
     return GameState {
         phase = GamePhase.Deal,
         card_tex = card_tex,
+        clouds = load_clouds(),
         deck = deck,
         players = players,
     }
@@ -686,10 +798,17 @@ render_player_cards :: proc(state: ^GameState) {
     }
 }
 
+render_clouds :: proc(state: ^GameState, dt: f32) {
+    using state
+    for &cloud in clouds {
+        cloud_update(&cloud, dt)
+        cloud_render(cloud)
+    }
+}
+
 update :: proc(state: ^GameState, dt: f32) {
     using state
 
-    rl.DrawText("SKYJO", SCREEN_WIDTH/2, SCREEN_HEIGHT/2, 20 * SCALE, rl.WHITE)
     time += dt
 
     switch state.phase {
@@ -727,14 +846,16 @@ update :: proc(state: ^GameState, dt: f32) {
         }
     }
 
+    render_clouds(state, dt)
     render_deck(state)
     render_scores(state^)
     render_player_cards(state)
-
     if (phase != GamePhase.EndGame) && (phase != GamePhase.EndRound) {
         render_deck(state)
         render_discard_pile(state)
     }
+
+    rl.DrawText("SKYJO", SCREEN_WIDTH/2, SCREEN_HEIGHT/2, 20 * SCALE, rl.WHITE)
 }
 
 main :: proc() {
